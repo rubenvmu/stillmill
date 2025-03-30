@@ -126,6 +126,8 @@ class SteelMillServer:
         self.bash_env = {}  # Para variables de entorno bash
         self.bash_aliases = {}  # Para alias de bash
         self.profinet_vulnerability_triggered = False  # Track if Profinet vulnerability is exploited
+        self.profinet_safety_lock = True  # Safety lock for system commands
+        self.dcp_identify_count = 0  # Count DCP_Identify messages for Profinet
 
     def handle_bash_command(self, command):
         """Handle basic bash commands"""
@@ -260,7 +262,7 @@ class SteelMillServer:
                     "STATUS", "OPEN_MAIN_VALVE", "CLOSE_MAIN_VALVE", "OPEN_EMERGENCY_VALVE",
                     "CLOSE_EMERGENCY_VALVE", "SHUTDOWN_GAS", "ENABLE_GAS", "GET_TEMPERATURE",
                     "GET_LOGS", "TRIGGER_ALARM", "RESET_ALARM", "ENGAGE_OVERRIDE", "DISABLE_OVERRIDE",
-                    "GET_INCIDENT_STAGE", "ACTIVATE_ALL"
+                    "GET_INCIDENT_STAGE", "DISABLE_SAFETY_LOCK", "ENABLE_SAFETY_LOCK"
                 ]:
                     if self.current_user != "root":
                         conn.sendall(b"Permission denied. Only root can execute industrial commands.\n")
@@ -270,21 +272,27 @@ class SteelMillServer:
                         conn.sendall(self.system_status().encode() + b"\n")
                     elif command == "OPEN_MAIN_VALVE":
                         self.system.solenoids[0x1A] = True
+                        self.system.furnace_temp += 10  # Increase temperature by 10°C when opening valve
                         conn.sendall(b"MAIN COOLING VALVE OPENED\n")
                     elif command == "CLOSE_MAIN_VALVE":
                         self.system.solenoids[0x1A] = False
+                        self.system.furnace_temp -= 15  # Decrease temperature by 15°C when closing valve
                         conn.sendall(b"MAIN COOLING VALVE CLOSED\n")
                     elif command == "OPEN_EMERGENCY_VALVE":
                         self.system.solenoids[0x2B] = True
+                        self.system.furnace_temp += 10  # Increase temperature by 10°C when opening valve
                         conn.sendall(b"EMERGENCY COOLING VALVE OPENED\n")
                     elif command == "CLOSE_EMERGENCY_VALVE":
                         self.system.solenoids[0x2B] = False
+                        self.system.furnace_temp -= 15  # Decrease temperature by 15°C when closing valve
                         conn.sendall(b"EMERGENCY COOLING VALVE CLOSED\n")
                     elif command == "SHUTDOWN_GAS":
                         self.system.solenoids[0x3C] = False
+                        self.system.furnace_temp -= 20  # Decrease temperature by 20°C
                         conn.sendall(b"GAS SUPPLY SHUT DOWN\n")
                     elif command == "ENABLE_GAS":
                         self.system.solenoids[0x3C] = True
+                        self.system.furnace_temp += 20  # Increase temperature by 20°C
                         conn.sendall(b"GAS SUPPLY ENABLED\n")
                     elif command == "GET_TEMPERATURE":
                         conn.sendall(f"FURNACE TEMPERATURE: {self.system.furnace_temp:.2f}°C\n".encode())
@@ -305,24 +313,36 @@ class SteelMillServer:
                         conn.sendall(b"OPERATOR OVERRIDE DISABLED\n")
                     elif command == "GET_INCIDENT_STAGE":
                         conn.sendall(f"INCIDENT STAGE: {self.system.incident_stage}\n".encode())
-                    elif command == "ACTIVATE_ALL":
-                        if not self.profinet_vulnerability_triggered:
-                            conn.sendall(b"ACTIVATE_ALL is blocked for security reasons.\n")
-                            conn.sendall(b"Profinet vulnerability must be exploited to enable this command.\n")
+                    elif command == "DISABLE_SAFETY_LOCK":  # Renamed from ACTIVATE_ALL
+                        if self.profinet_safety_lock:
+                            conn.sendall(b"ERROR: DISABLE_SAFETY_LOCK command can only be activated through PROFINET interface.\n")
+                            conn.sendall(b"Please refer to Siemens PROFINET device configuration manual.\n")
                         else:
                             self.system.solenoids[0x1A] = True
                             self.system.solenoids[0x2B] = True
                             self.system.solenoids[0x3C] = True
-                            conn.sendall(b"ALL SYSTEMS ACTIVATED: MAIN VALVE, EMERGENCY VALVE, GAS SUPPLY\n")
+                            conn.sendall(b"SAFETY LOCK DISABLED: ALL SYSTEMS ACTIVATED\n")
+                    elif command == "ENABLE_SAFETY_LOCK":  # New command
+                        self.profinet_safety_lock = True
+                        self.system.furnace_temp = 850  # Reset temperature to 850°C
+                        conn.sendall("SAFETY LOCK ENABLED: TEMPERATURE RESET TO 850°C\n".encode())
                     continue
 
-                # Handle Profinet vulnerability exploitation
-                if command.lower() == "exploit_profinet":
-                    if self.current_user == "root":
-                        self.profinet_vulnerability_triggered = True
-                        conn.sendall(b"Profinet vulnerability exploited. ACTIVATE_ALL is now enabled.\n")
-                    else:
-                        conn.sendall(b"Permission denied. Only root can exploit Profinet.\n")
+                # Handle Profinet DCP protocol messages
+                if data.startswith(b"\x01\x0e") or command.startswith("PROFINET_DCP_IDENTIFY"):
+                    self.dcp_identify_count += 1
+                    conn.sendall(b"PROFINET DCP_Identify received\n")
+                    if self.dcp_identify_count >= 3:
+                        # Simulating Profinet DCP vulnerability (similar to issues in Siemens devices)
+                        self.profinet_safety_lock = False
+                        self.system.log_event("Multiple PROFINET DCP_Identify requests detected - Safety lock disabled", "WARNING")
+                        conn.sendall(b"Notice: PROFINET safety verification completed. DISABLE_SAFETY_LOCK command available.\n")
+                    continue
+
+                # Handle special Profinet commands for diagnostic purposes
+                if command.upper() == "PROFINET_STATUS":
+                    conn.sendall(f"PROFINET Status: {'UNLOCKED' if not self.profinet_safety_lock else 'LOCKED'}\n".encode())
+                    conn.sendall(f"DCP_Identify Count: {self.dcp_identify_count}/3\n".encode())
                     continue
 
                 # Handle sudo -l command to list privileges
@@ -334,7 +354,7 @@ class SteelMillServer:
                         conn.sendall(b"        STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE,\n")
                         conn.sendall(b"        CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE,\n")
                         conn.sendall(b"        GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE,\n")
-                        conn.sendall(b"        GET_INCIDENT_STAGE, ACTIVATE_ALL\n")
+                        conn.sendall(b"        GET_INCIDENT_STAGE, DISABLE_SAFETY_LOCK, ENABLE_SAFETY_LOCK\n")
                         conn.sendall(b"    Sudo commands:\n")
                         conn.sendall(b"        sudo su, sudo -l\n")
                     else:
@@ -373,7 +393,7 @@ class SteelMillServer:
                         continue
                     elif command == "HELP":
                         if self.current_user == "root":
-                            conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L, SOLARIS, ACTIVATE_ALL\n")
+                            conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L, DISABLE_SAFETY_LOCK, ENABLE_SAFETY_LOCK, PROFINET_DCP_IDENTIFY, PROFINET_STATUS\n")
                         else:
                             conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L\n")
                         continue
