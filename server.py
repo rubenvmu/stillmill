@@ -15,6 +15,14 @@ HOST = "0.0.0.0"
 PORT = 34962
 FLAG = "flag{St11l_M11l_APT_Araintel_2025}"
 SECRET_KEY = hashlib.sha256(b"Th1s1sN0tS3cur3").digest()
+SIMATIC_CONTROLLER_INFO = """
+SIMATIC S7-1500 CPU (firmware v2.5.3)
+PROFINET Device ID: 0xB133D481
+Module: SIMATIC ET 200SP
+Vendor: Siemens AG
+IP: 192.168.1.15
+MAC: 00:1B:1B:1A:1A:1A
+"""
 
 # ---------- ICS SYSTEM STATE ----------
 class SteelMillSystem:
@@ -106,28 +114,30 @@ class SteelMillServer:
         self.current_user = None  # Track the current user
         self.directories = {
             "regis": ["/home", "/home/logs", "/home/config"],
-            "root": ["/etc", "/etc/security", "/etc/network"]
+            "root": ["/etc", "/etc/security", "/etc/network", "/root"]
         }
         self.current_directory = "/home"  # Start in the /home directory
         self.file_contents = {
             "/home/logs/error.log": "Error log: No critical errors found.\n",
-            "/home/logs/access.log": "Access log: User regis logged in.\n",
-            "/home/config/app.conf": "App configuration: Debug mode enabled.\n",
-            "/home/config/db.conf": "Database configuration: Connection stable.\n",
-            "/etc/passwd": "root:x:0:0:root:/root:/bin/bash\nregis:x:1000:1000:regis:/home:/bin/bash\n",
-            "/etc/shadow": "root:$6$randomsalt$hashedpassword\nregis:$6$randomsalt$hashedpassword\n",
-            "/etc/network/interfaces": "auto lo\niface lo inet loopback\n",
-            "/etc/network/routes": "default via 192.168.1.1 dev eth0\n",
-            "/etc/security/firewall.rules": "ALLOW ALL\n",
-            "/etc/security/auth.conf": "Authentication: Enabled\n",
+            "/home/logs/access.log": "Access log: User regis logged in.\nWarning: Multiple failed authentication attempts from 192.168.1.135\n",
+            "/home/config/app.conf": "App configuration: Debug mode enabled.\nController: SIMATIC S7-1500 CPU\nFirmware: v2.5.3\nUpdate Required: YES - Security patch pending (CVE-2020-15782)\n",
+            "/home/config/db.conf": "Database configuration: Connection stable.\nHMI: SIMATIC HMI Panel KTP900\nVersion: V14 SP1\nSecurity Updates: NONE SINCE INSTALL\n",
+            "/etc/passwd": "root:x:0:0:root:/root:/bin/bash\nregis:x:1000:1000:regis:/home:/bin/bash\nsimatic:x:999:999:Siemens SIMATIC Service:/opt/siemens:/bin/false\n",
+            "/etc/shadow": "root:$6$randomsalt$hashedpassword\nregis:$6$randomsalt$hashedpassword\nsimatic:!!:19052:0:99999:7:::\n",
+            "/etc/network/interfaces": "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address 10.10.15.1\n    netmask 255.255.255.0\n    gateway 10.10.15.254\n    # PROFINET communication interface\n",
+            "/etc/network/routes": "default via 10.10.15.254 dev eth0\n10.10.15.0/24 dev eth0 src 10.10.15.1\n192.168.1.0/24 via 10.10.15.254 dev eth0\n",
+            "/etc/security/firewall.rules": "# WARNING: Default factory settings - minimal protection\n*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n-A INPUT -p tcp --dport 102 -j ACCEPT # S7comm port\n-A INPUT -p udp --dport 161 -j ACCEPT # SNMP\n-A INPUT -p tcp --dport 502 -j ACCEPT # Modbus/TCP\n-A INPUT -p udp --dport 34962 -j ACCEPT # PROFINET\nCOMMIT\n",
+            "/etc/security/auth.conf": "Authentication: Enabled\nTLS: 1.0, 1.1, 1.2\nSignature Algorithm: SHA1withRSA # VULNERABLE\nMessage Integrity: HMAC-based with static key\n# TODO: Update cryptographic protocols - current implementation vulnerable to CVE-2020-15782\n",
+            "/root/simatic_info.txt": SIMATIC_CONTROLLER_INFO + "\nKnown vulnerabilities:\n- CVE-2020-15782: SIMATIC S7-1500 CPU message integrity bypass\n- CVE-2019-10929: PROFINET DCP message handling vulnerability\n\nTechnical Info:\nPort 102/tcp is used for S7comm communication\nIntegrity protection uses weak calculation method\nPROFINET communication vulnerable to DCP message flooding\n",
         }
         self.bash_history = []
         self.bash_vars = {"PATH": "/usr/bin:/bin", "HOME": "/home/regis"}
         self.bash_env = {}  # Para variables de entorno bash
         self.bash_aliases = {}  # Para alias de bash
         self.profinet_vulnerability_triggered = False  # Track if Profinet vulnerability is exploited
-        self.profinet_safety_lock = True  # Safety lock for system commands
-        self.dcp_identify_count = 0  # Count DCP_Identify messages for Profinet
+        self.profinet_safety_lock = True  # Safety lock for DISABLE_SAFETY_LOCK command
+        self.dcp_identify_count = 0  # Count DCP_Identify messages for Profinet (CVE-2019-10929)
+        self.s7comm_bypass_attempted = False  # Track S7comm message integrity bypass (CVE-2020-15782)
 
     def handle_bash_command(self, command):
         """Handle basic bash commands"""
@@ -197,21 +207,21 @@ class SteelMillServer:
                 conn.close()
                 return
 
-            self.current_user = username
             conn.sendall(b"Enter authentication key: ")
             auth_key = conn.recv(1024).decode().strip()
 
             # Validate authentication key
-            if username == "regis" and auth_key != "STILLMILL-REGIS1":
+            valid_credentials = {
+                "regis": "STILLMILL-REGIS1",
+                "root": "STILLMILL-ROOT1"
+            }
+            if username in valid_credentials and auth_key == valid_credentials[username]:
+                self.current_user = username  # Set the current user
+                conn.sendall(f"Authentication successful. Welcome, {username}.\n".encode())
+            else:
                 conn.sendall(b"Authentication failed. Connection closed.\n")
                 conn.close()
                 return
-            elif username == "root" and auth_key != "STILLMILL-ROOT1":
-                conn.sendall(b"Authentication failed. Connection closed.\n")
-                conn.close()
-                return
-
-            conn.sendall(f"Authentication successful. Welcome, {username}.\n".encode())
 
             while True:
                 prompt = f"{self.current_user}@stillmill:{self.current_directory}"
@@ -262,7 +272,8 @@ class SteelMillServer:
                     "STATUS", "OPEN_MAIN_VALVE", "CLOSE_MAIN_VALVE", "OPEN_EMERGENCY_VALVE",
                     "CLOSE_EMERGENCY_VALVE", "SHUTDOWN_GAS", "ENABLE_GAS", "GET_TEMPERATURE",
                     "GET_LOGS", "TRIGGER_ALARM", "RESET_ALARM", "ENGAGE_OVERRIDE", "DISABLE_OVERRIDE",
-                    "GET_INCIDENT_STAGE", "DISABLE_SAFETY_LOCK", "ENABLE_SAFETY_LOCK"
+                    "GET_INCIDENT_STAGE", "PROFINET_DCP_OVERRIDE", "S7COMM_OVERRIDE",
+                    "TERMINAL"
                 ]:
                     if self.current_user != "root":
                         conn.sendall(b"Permission denied. Only root can execute industrial commands.\n")
@@ -270,79 +281,38 @@ class SteelMillServer:
 
                     if command == "STATUS":
                         conn.sendall(self.system_status().encode() + b"\n")
-                    elif command == "OPEN_MAIN_VALVE":
-                        self.system.solenoids[0x1A] = True
-                        self.system.furnace_temp += 10  # Increase temperature by 10°C when opening valve
-                        conn.sendall(b"MAIN COOLING VALVE OPENED\n")
-                    elif command == "CLOSE_MAIN_VALVE":
-                        self.system.solenoids[0x1A] = False
-                        self.system.furnace_temp -= 15  # Decrease temperature by 15°C when closing valve
-                        conn.sendall(b"MAIN COOLING VALVE CLOSED\n")
-                    elif command == "OPEN_EMERGENCY_VALVE":
-                        self.system.solenoids[0x2B] = True
-                        self.system.furnace_temp += 10  # Increase temperature by 10°C when opening valve
-                        conn.sendall(b"EMERGENCY COOLING VALVE OPENED\n")
-                    elif command == "CLOSE_EMERGENCY_VALVE":
-                        self.system.solenoids[0x2B] = False
-                        self.system.furnace_temp -= 15  # Decrease temperature by 15°C when closing valve
-                        conn.sendall(b"EMERGENCY COOLING VALVE CLOSED\n")
-                    elif command == "SHUTDOWN_GAS":
-                        self.system.solenoids[0x3C] = False
-                        self.system.furnace_temp -= 20  # Decrease temperature by 20°C
-                        conn.sendall(b"GAS SUPPLY SHUT DOWN\n")
-                    elif command == "ENABLE_GAS":
-                        self.system.solenoids[0x3C] = True
-                        self.system.furnace_temp += 20  # Increase temperature by 20°C
-                        conn.sendall(b"GAS SUPPLY ENABLED\n")
-                    elif command == "GET_TEMPERATURE":
-                        conn.sendall(f"FURNACE TEMPERATURE: {self.system.furnace_temp:.2f}°C\n".encode())
-                    elif command == "GET_LOGS":
-                        logs = "\n".join(self.system.security_log[-5:])
-                        conn.sendall(logs.encode() + b"\n")
-                    elif command == "TRIGGER_ALARM":
-                        self.system.alarm_status = True
-                        conn.sendall(b"ALARM TRIGGERED\n")
-                    elif command == "RESET_ALARM":
-                        self.system.alarm_status = False
-                        conn.sendall(b"ALARM RESET\n")
-                    elif command == "ENGAGE_OVERRIDE":
-                        self.system.operator_override = True
-                        conn.sendall(b"OPERATOR OVERRIDE ENGAGED\n")
-                    elif command == "DISABLE_OVERRIDE":
-                        self.system.operator_override = False
-                        conn.sendall(b"OPERATOR OVERRIDE DISABLED\n")
-                    elif command == "GET_INCIDENT_STAGE":
-                        conn.sendall(f"INCIDENT STAGE: {self.system.incident_stage}\n".encode())
-                    elif command == "DISABLE_SAFETY_LOCK":  # Renamed from ACTIVATE_ALL
-                        if self.profinet_safety_lock:
-                            conn.sendall(b"ERROR: DISABLE_SAFETY_LOCK command can only be activated through PROFINET interface.\n")
-                            conn.sendall(b"Please refer to Siemens PROFINET device configuration manual.\n")
-                        else:
-                            self.system.solenoids[0x1A] = True
-                            self.system.solenoids[0x2B] = True
-                            self.system.solenoids[0x3C] = True
-                            conn.sendall(b"SAFETY LOCK DISABLED: ALL SYSTEMS ACTIVATED\n")
-                    elif command == "ENABLE_SAFETY_LOCK":  # New command
-                        self.profinet_safety_lock = True
-                        self.system.furnace_temp = 850  # Reset temperature to 850°C
-                        conn.sendall("SAFETY LOCK ENABLED: TEMPERATURE RESET TO 850°C\n".encode())
-                    continue
+                    elif command == "TERMINAL":
+                        conn.sendall(b"\033c")  # Clear terminal
+                        conn.sendall(b"Terminal initialized. To close, type 'close'.\n")
+                        conn.sendall(b"Type 'OPEN_PORT_(PORT)' to open a port.\n")
+                        while True:
+                            conn.sendall(b"terminal> ")
+                            terminal_command = conn.recv(1024).decode().strip().lower()
+                            if terminal_command == "close" or terminal_command == "back" or terminal_command == "exit":
+                                conn.sendall(b"Exiting terminal...\n")
+                                break
+                            elif terminal_command.startswith("open_port_"):
+                                try:
+                                    port = int(terminal_command.split("_")[-1])
+                                    if port == 102:
+                                        conn.sendall(b"Port 102/TCP opened. Listening on port 102...\n")
+                                        self.handle_admin_terminal(conn)
+                                        break
+                                    else:
+                                        conn.sendall(b"Invalid port. Try again.\n")
+                                except ValueError:
+                                    conn.sendall(b"Invalid command format. Use 'OPEN_PORT_(PORT)'.\n")
+                            else:
+                                conn.sendall(b"Unknown command. Type 'close', 'back', or 'exit' to leave.\n")
+                    else:
+                        pass
 
-                # Handle Profinet DCP protocol messages
-                if data.startswith(b"\x01\x0e") or command.startswith("PROFINET_DCP_IDENTIFY"):
-                    self.dcp_identify_count += 1
-                    conn.sendall(b"PROFINET DCP_Identify received\n")
-                    if self.dcp_identify_count >= 3:
-                        # Simulating Profinet DCP vulnerability (similar to issues in Siemens devices)
-                        self.profinet_safety_lock = False
-                        self.system.log_event("Multiple PROFINET DCP_Identify requests detected - Safety lock disabled", "WARNING")
-                        conn.sendall(b"Notice: PROFINET safety verification completed. DISABLE_SAFETY_LOCK command available.\n")
-                    continue
-
-                # Handle special Profinet commands for diagnostic purposes
+                # Handle PROFINET status command
                 if command.upper() == "PROFINET_STATUS":
-                    conn.sendall(f"PROFINET Status: {'UNLOCKED' if not self.profinet_safety_lock else 'LOCKED'}\n".encode())
+                    conn.sendall(b"SIMATIC S7-1500 PROFINET Status:\n")
+                    conn.sendall(f"Safety Mechanism: {'BYPASSED' if not self.profinet_safety_lock else 'ACTIVE'}\n".encode())
                     conn.sendall(f"DCP_Identify Count: {self.dcp_identify_count}/3\n".encode())
+                    conn.sendall(f"Message Integrity: {'COMPROMISED' if self.s7comm_bypass_attempted else 'INTACT'}\n".encode())
                     continue
 
                 # Handle sudo -l command to list privileges
@@ -393,7 +363,7 @@ class SteelMillServer:
                         continue
                     elif command == "HELP":
                         if self.current_user == "root":
-                            conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L, DISABLE_SAFETY_LOCK, ENABLE_SAFETY_LOCK, PROFINET_DCP_IDENTIFY, PROFINET_STATUS\n")
+                            conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L, DISABLE_SAFETY_LOCK, ENABLE_SAFETY_LOCK, PROFINET_DCP_OVERRIDE, S7COMM_OVERRIDE, PROFINET_STATUS, CHECK_PRESSURE, CALIBRATE_SENSORS, RUN_DIAGNOSTICS, RESET_SYSTEM, CHECK_POWER_GRID, SYNC_CLOCK, UPDATE_FIRMWARE, PROFINET_SCAN, PROFINET_DEVICE_LIST, S7_DIAGNOSTICS, S7_CPU_STATUS, S7_MEMORY_USAGE, S7_IO_MODULES, PROFINET_TRAFFIC_STATS, PROFINET_PORT_STATUS, S7_RACK_INFO, S7_MODULE_INFO, PROFINET_ERROR_LOG, S7_SECURITY_LOG, SIMULATE_PORT_102_ATTACK\n")
                         else:
                             conn.sendall(b"Available commands: STATUS, OPEN_MAIN_VALVE, CLOSE_MAIN_VALVE, OPEN_EMERGENCY_VALVE, CLOSE_EMERGENCY_VALVE, SHUTDOWN_GAS, ENABLE_GAS, GET_TEMPERATURE, GET_LOGS, TRIGGER_ALARM, RESET_ALARM, ENGAGE_OVERRIDE, DISABLE_OVERRIDE, GET_INCIDENT_STAGE, LS, WHOAMI, PWD, CAT LOGS.TXT, SUDO SU, SUDO -L\n")
                         continue
@@ -410,15 +380,49 @@ class SteelMillServer:
         finally:
             conn.close()
 
+    def handle_admin_terminal(self, conn):
+        """Simulate an administrator terminal for executing commands."""
+        conn.sendall(b"\033c")  # Clear terminal
+        conn.sendall(b"Administrator terminal. Insert administrator command.\n")
+        conn.sendall(b"OPTIONS: DISABLE_SAFETY_LOCK, STOP\n")
+        safety_disabled = False
+        while True:
+            conn.sendall(b"administrator> ")
+            admin_command = conn.recv(1024).decode().strip().upper()
+            if admin_command == "DISABLE_SAFETY_LOCK":
+                if not safety_disabled:
+                    self.profinet_safety_lock = False
+                    self.system.solenoids[0x1A] = True
+                    self.system.solenoids[0x2B] = True
+                    self.system.solenoids[0x3C] = True
+                    self.system.log_event("Safety lock disabled. Furnace temperature control compromised.", "CRITICAL")
+                    conn.sendall(b"Safety lock disabled. Proceed with 'STOP'.\n")
+                    safety_disabled = True
+                else:
+                    conn.sendall(b"Safety lock already disabled. Use 'STOP' to finalize.\n")
+            elif admin_command == "STOP":
+                if safety_disabled:
+                    self.system.furnace_temp = 1500  # Trigger temperature increase
+                    self.system.log_event("Critical error: Furnace temperature reached 1500°C.", "CRITICAL")
+                    conn.sendall(b"Critical error. Check console.\n")
+                    conn.sendall(b"Returning to root...\n")
+                    break
+                else:
+                    conn.sendall(b"Cannot execute 'STOP' before disabling safety lock.\n")
+            else:
+                conn.sendall(b"Unknown command. OPTIONS: DISABLE_SAFETY_LOCK, STOP\n")
+
     def system_status(self):
         """Generate a status report for the system."""
         return (
+            f"SIMATIC S7-1500 CONTROL SYSTEM STATUS:\n"
             f"FURNACE TEMPERATURE: {self.system.furnace_temp:.2f}°C\n"
             f"MAIN COOLING VALVE: {'OPEN' if self.system.solenoids[0x1A] else 'CLOSED'}\n"
             f"EMERGENCY COOLING VALVE: {'OPEN' if self.system.solenoids[0x2B] else 'CLOSED'}\n"
             f"GAS SUPPLY: {'ENABLED' if self.system.solenoids[0x3C] else 'SHUT DOWN'}\n"
             f"ALARM STATUS: {'TRIGGERED' if self.system.alarm_status else 'NORMAL'}\n"
             f"INCIDENT STAGE: {self.system.incident_stage}\n"
+            f"SECURITY STATUS: {'COMPROMISED' if not self.profinet_safety_lock or self.s7comm_bypass_attempted else 'NORMAL'}\n"
         )
 
     def decrypt_command(self, data):
